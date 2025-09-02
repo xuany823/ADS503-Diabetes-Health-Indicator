@@ -1,0 +1,1460 @@
+---
+title: "Diabetes Health Indicators Dataset"
+author: "Michelle Wang - Maria Mora Mora - Sherey Thaker"
+Date: 6-22-2025
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+# 1. \| Introduction
+
+```{r, echo=FALSE}
+library(knitr)
+include_graphics("https://media.gettyimages.com/id/2155925111/photo/hand-holding-glucometer-on-healthy-food-background.jpg?s=2048x2048&w=gi&k=20&c=4CdeMfNzO5EVwcpwvyPX2eAIuPyn1hN09EcXakmqu9c=")
+```
+
+Image provided by gettyimages: credit:fcafotodigital
+
+```{r warning=FALSE, message=FALSE}
+library(caret)
+library(ggplot2)
+library(kernlab)
+library(dplyr)
+library(corrplot)
+library(reshape2)
+library(gridExtra)
+library(rlang)
+library(ggcorrplot)
+library(fastDummies)
+
+seed <- 123
+```
+
+```{R}
+db <- read.csv('/Users/mariamoramora/Documents/SD/ADS503/Final_Project/diabetes5050.csv')
+#db <- read.csv('/Users/xuanwang/diabetes5050.csv')
+
+```
+
+# 2. \| EDA-Data Understanding
+
+First, Summerize data structure,variables, type,
+
+```{r}
+colSums(is.na(db))
+```
+Generate a summary table with numeric variables as rows and descriptive statistics as columns.
+```{r}
+dim(db)
+summary_df <- as.data.frame(t(sapply(db[sapply(db, is.numeric)], summary)))
+
+colnames(summary_df) <- c("Min", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max")
+
+kable(summary_df, caption = "Summary Statistics (Variables as Rows)")
+
+str(db)
+```
+
+Next, to table out the distribution of target variable
+
+```{r}
+table(db$Diabetes_binary)
+table(db$Age)
+table(db$GenHlth)
+table(db$Income)
+table(db$Education)
+```
+We want to check unique value counts helps identify categorical variables and features with low variance before preprocessing or modeling.
+```{r}
+unique_counts <- sapply(db, function(x) length(unique(x)))
+
+unique_df <- data.frame(Variable = names(unique_counts), 
+                        Unique_Values = as.integer(unique_counts)) %>% arrange(desc(Unique_Values))
+
+kable(unique_df, caption = "Number of Unique Values per Variable")
+```
+
+Distribution of predictors
+now, Visualizing the distribution of each variable helps identify data imbalance, unusual patterns, and potential preprocessing needs such as encoding or normalization before modeling.
+
+
+```{r}
+dist_db <- subset(db, select = -c(BMI, Diabetes_binary))
+
+plot_var <- names(dist_db)
+
+is_binary <- sapply(dist_db, function(x) all(na.omit(unique(x)) %in% c(0, 1)))
+
+plots <- lapply(plot_var, function(var) {
+  p <- ggplot(dist_db, aes_string(x = var)) +
+    geom_bar(fill = "steelblue") +
+    ggtitle(var) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 10),
+      axis.text.x = element_text(hjust = 1),
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank()
+    )
+  
+
+  if (is_binary[[var]]) {
+    p <- p + scale_x_continuous(breaks = c(0, 1))
+  }
+
+  return(p)
+})
+
+ncol <- 5
+nrow <- ceiling(length(plots) / ncol)
+
+options(repr.plot.width = 25, repr.plot.height = 25)
+
+grid.arrange(grobs = plots, nrow = nrow, ncol = ncol)
+```
+
+Explore how age impact diabetes
+
+```{r}
+options(repr.plot.width = 6, repr.plot.height = 4)
+db$Diabetes_binary <- as.factor(db$Diabetes_binary)
+
+db$Age <- as.factor(db$Age)
+age_levels <- unique(db$Age)
+
+ggplot(db, aes(x = Age, fill = Diabetes_binary)) +
+  geom_bar(position = "dodge") +
+  scale_x_discrete(limits = age_levels) +  
+  labs(title = "Diabetes Cases by Age Group",
+       x = "Age Group",
+       y = "Count",
+       fill = "Diabetes") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 1))
+```
+
+-   1 Age 18 to 24
+
+-   2 Age 25 to 29
+
+-   3 Age 30 to 34
+
+-   4 Age 35 to 39
+
+-   5 Age 40 to 44
+
+-   6 Age 45 to 49
+
+-   7 Age 50 to 54
+
+-   8 Age 55 to 59
+
+-   9 Age 60 to 64
+
+-   10 Age 65 to 69
+
+-   11 Age 70 to 74
+
+-   12 Age 75 to 79
+
+-   13 Age 80 or older
+
+Explore how Gental Heath impact **diabetes**
+
+```{r}
+# average of genhlth to age
+genhlth_by_age <- db %>%
+  group_by(Age) %>%
+  summarise(mean_genhlth = mean(GenHlth))
+
+options(repr.plot.width = 6, repr.plot.height = 4)
+
+ggplot(genhlth_by_age, aes(x = Age, y = mean_genhlth, group = 1)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_point(color = "steelblue", size = 2) +
+  scale_y_continuous(breaks = 1:5, limits = c(1, 5)) +
+  labs(title = "Average General Health by Age Group",
+       x = "Age Group",
+       y = "Mean General Health (1 = excellent, 5 = poor)") +
+  theme_minimal()
+```
+
+BMI Distribution by Diabetes Status
+
+```{r}
+ggplot(db, aes(x = BMI, fill = Diabetes_binary)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "BMI Density by Diabetes Status",
+       x = "BMI",
+       fill = "Diabetes") +
+  theme_minimal()
+```
+
+```{r}
+db$BMI_group_label <- cut(db$BMI,
+                          breaks = c(0, 18.5, 25, 30, 35, 40, Inf),
+                          labels = c("Underweight", "Normal", "Overweight", "Obese I", "Obese II", "Obese III"),
+                          right = FALSE)
+
+ggplot(db, aes(x = BMI_group_label, fill = Diabetes_binary)) +
+  geom_bar(position = "fill") +
+  labs(title = "Diabetes Proportion by BMI Group",
+       x = "BMI Category",
+       y = "Proportion",
+       fill = "Diabetes") +
+  theme_minimal()
+```
+
+```{r}
+db$Diabetes_binary <- as.factor(db$Diabetes_binary)
+
+ggplot(db, aes(x = Diabetes_binary, y = BMI, fill = Diabetes_binary)) +
+  geom_boxplot() +
+  labs(title = "BMI by Diabetes Status",
+       x = "Diabetes (0 = No, 1 = Yes)",
+       y = "BMI") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+```{r}
+# Ensure Diabetes_binary is factor (for color distinction)
+db$Diabetes_binary <- as.factor(db$Diabetes_binary)
+
+# Scatterplot (pair plot) of BMI vs Age
+ggplot(db, aes(x = Age, y = BMI, color = Diabetes_binary)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(title = "Pair Plot: Body Mass Index vs. Age",
+       x = "Age",
+       y = "BMI",
+       color = "Diabetes") +
+  theme_minimal()
+
+```
+
+
+
+
+Correlation Heatmap
+
+```{r, fig.width=8, fig.height=8}
+db$Diabetes_binary <- as.numeric(as.character(db$Diabetes_binary))
+numeric_vars <- db[sapply(db, is.numeric)]
+cor_matrix <- cor(numeric_vars, use = "complete.obs")
+ggcorrplot(cor_matrix,
+           method = "square",
+           type = "upper",
+           lab = TRUE,
+           lab_size = 2.5,
+           tl.cex = 10,
+           tl.srt = 45,
+           colors = c("blue", "white", "red"),
+           title = "Correlation Heatmap",
+           ggtheme = theme_minimal())
+```
+
+
+```{r}
+cor_rounded <- round(cor_matrix, 3)
+kable(cor_rounded, caption = "Full Pearson Correlation Matrix")
+```
+
+
+
+Correlation with Diabetes_binary
+```{r}
+db$Diabetes_binary <- as.numeric(as.character(db$Diabetes_binary))
+# correlation with diabetes
+cor_with_diabetes <- cor_matrix["Diabetes_binary", ]
+cor_with_diabetes <- cor_with_diabetes[names(cor_with_diabetes) != "Diabetes_binary"]
+
+#desc table 
+cor_df <- data.frame(Correlation = round(cor_with_diabetes, 3)) %>% arrange(desc(Correlation))
+
+kable(cor_df, caption = "Correlation with Diabetes_binary")
+```
+
+Variable Importance Patterns (via Correlation with Diabetes)
+
+```{r}
+library(ggplot2)
+
+cor_df <- data.frame(
+  variable = names(cor_with_diabetes),
+  correlation = cor_with_diabetes
+)
+
+ggplot(cor_df, aes(x = reorder(variable, correlation), y = correlation)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Correlation with Diabetes_binary",
+       x = "",
+       y = "Correlation") +
+  theme_minimal()
+```
+
+```{r}
+library(ggplot2)
+
+db$Diabetes_binary <- as.factor(db$Diabetes_binary)
+
+db$GenHlth_label <- factor(db$GenHlth,
+                           levels = 1:5,
+                           labels = c("Excellent", "Very good", "Good", "Fair", "Poor"))
+
+# 3. 使用新变量作图
+ggplot(db, aes(x = GenHlth_label, fill = Diabetes_binary)) +
+  geom_bar(position = "fill") +
+  labs(title = "Proportion of Diabetes by General Health Status",
+       x = "General Health",
+       y = "Proportion",
+       fill = "Diabetes") +
+  theme_minimal()
+```
+
+
+
+
+
+
+
+
+
+
+
+For tree-based models like Random Forest or XGBoost, we do not remove near-zero variance features.
+These models can inherently ignore uninformative variables and capture rare-but-important splits.
+
+
+
+# **3. \| Data Pre-processing**
+
+## Transform - Aggregate - Normalize - Feature Engineering
+
+In this section the data will be transformed, aggreate, normalized and create feature engineering to increase the prediction power as much as possible before start building the machine learning models. Each pre-processing stage will be included and created an end-to-end pre-processing pipeline. At the end of the pro-processing, the data will be splitted according to its initial size, and scaled using a standard scaler. Data is already balanced for both 0: no diabetes, 1: diabetes.
+
+Data Pipeline steps on this section for Dataset Pre-processing:
+
+-   Transformation-\> Feature Engineering -\> Binning and Encoding -\> Dropping Columns
+
+## Data Pre-processing Pipeline
+
+## 3.1 \| Transformation
+
+In feature engineering, we'll identify data types and apply methods to prepare the data for machine learning.
+
+```{r warning=FALSE}
+# Convert binary variables to factors for better handling
+binary_vars <- c("Diabetes_binary", "HighBP", "HighChol", "CholCheck", 
+                "Smoker", "Stroke", "HeartDiseaseorAttack", "PhysActivity",
+                "Fruits", "Veggies", "HvyAlcoholConsump", "AnyHealthcare",
+                "NoDocbcCost", "DiffWalk", "Sex")
+
+db_processed <- db %>%
+  mutate_at(vars(all_of(binary_vars)), as.factor) %>%
+  mutate(
+    Age = as.factor(Age),
+    Education = as.factor(Education),
+    Income = as.factor(Income),
+    GenHlth = as.factor(GenHlth)
+  )
+
+# Keep BMI as numeric for feature engineering
+str(db_processed)
+```
+
+## 3.2 \| Feature Construction
+
+Creating composite variables that could be beneficial to reduce dimensionality and capture important relationships.
+
+```{r}
+db_featured <- db_processed %>%
+  mutate(
+    # Metabolic Syndrome Score (key diabetes predictors)
+    Metabolic_Syndrome_Score = as.numeric(HighBP) + as.numeric(HighChol) + 
+                               (BMI >= 30) * 1 + as.numeric(HeartDiseaseorAttack),
+    
+    # Comprehensive Health Risk (weighted by diabetes correlation)
+    Comprehensive_Health_Risk = (as.numeric(GenHlth) * 2) + as.numeric(HighBP) + 
+                                as.numeric(HighChol) + as.numeric(DiffWalk) + 
+                                (BMI >= 30) * 2,
+    
+    # Age-BMI Interaction (higher risk with age + obesity)
+    Age_BMI_Risk = as.numeric(Age) * (BMI / 25),
+    
+    # Poor Health Days Weighted Score
+    Poor_Health_Score = (PhysHlth * 0.6) + (MentHlth * 0.4) + 
+                        (as.numeric(DiffWalk) * 10),
+    
+    # Protective Lifestyle Score (inverse relationship expected)
+    Protective_Lifestyle = as.numeric(PhysActivity) + as.numeric(Fruits) + 
+                           as.numeric(Veggies) - (as.numeric(Smoker) * 2) - 
+                           as.numeric(HvyAlcoholConsump),
+    
+    # Socioeconomic Health Access (education + income + healthcare)
+    Socioeconomic_Health = as.numeric(Education) + as.numeric(Income) + 
+                           as.numeric(AnyHealthcare) - as.numeric(NoDocbcCost),
+    
+    # Critical Health Conditions Count
+    Critical_Conditions = as.numeric(HighBP) + as.numeric(HighChol) + 
+                          as.numeric(HeartDiseaseorAttack) + as.numeric(Stroke)
+  )
+```
+
+```{r}
+str(db$BMI)
+```
+
+
+```{r}
+    
+    # BMI Categories
+    BMI <- c(22, 27, 18, 31, 36)
+    BMI_Category <- cut(BMI, 
+                    breaks = c(0, 18.5, 25, 30, 35, Inf),
+                    labels = c("Underweight", "Normal", "Overweight", 
+                               "Obese_I", "Obese_II_III"),
+                    right = FALSE)
+    
+   Age_Group <- db_featured %>%
+  mutate(
+    Age_Group = case_when(
+      Age %in% c("1", "2", "3") ~ "Young_Adult",
+      Age %in% c("4", "5", "6", "7") ~ "Middle_Age",
+      Age %in% c("8", "9", "10", "11") ~ "Senior", 
+      Age %in% c("12", "13") ~ "Elderly",
+      TRUE ~ NA_character_  # needed to avoid missing value errors
+    )
+  )
+# Check correlation of new features with target variable
+new_features <- c("Metabolic_Syndrome_Score", "Comprehensive_Health_Risk", 
+                 "Age_BMI_Risk", "Poor_Health_Score", "Protective_Lifestyle",
+                 "Socioeconomic_Health", "Critical_Conditions")
+
+# Create subset for correlation analysis
+correlation_data <- db_featured[, c("Diabetes_binary", new_features)]
+
+# Convert factors to numeric for correlation
+correlation_data$Diabetes_binary <- as.numeric(correlation_data$Diabetes_binary) - 1
+
+# Calculate correlation matrix
+correlation_check <- cor(correlation_data, use = "complete.obs")
+
+# Print correlations with diabetes
+cat("Correlation of improved features with Diabetes:\n")
+print(round(correlation_check[1, -1], 3))
+
+# Compare with individual strong predictors
+original_predictors <- c("GenHlth", "HighBP", "BMI", "HighChol", "DiffWalk")
+original_data <- db_featured[, c("Diabetes_binary", original_predictors)]
+original_data$Diabetes_binary <- as.numeric(original_data$Diabetes_binary) - 1
+original_data$GenHlth <- as.numeric(original_data$GenHlth)
+original_data$HighBP <- as.numeric(original_data$HighBP)
+original_data$HighChol <- as.numeric(original_data$HighChol)
+original_data$DiffWalk <- as.numeric(original_data$DiffWalk)
+
+original_cors <- cor(original_data, use = "complete.obs")
+
+cat("\nFor comparison - Original top predictors correlations:\n")
+print(round(original_cors[1, -1], 3))
+```
+
+## 3.3 \| Feature Correlation Analysis
+
+```{r }
+# Create comprehensive correlation analysis with ALL features
+library(reshape2)
+
+# Combine all numeric/binary variables for comprehensive analysis
+all_numeric_vars <- c(
+  # Target variable
+  "Diabetes_binary",
+  
+  # Original continuous variables
+  "BMI", "MentHlth", "PhysHlth",
+  
+  # Original binary variables (as numeric)
+  "HighBP", "HighChol", "CholCheck", "Smoker", "Stroke", 
+  "HeartDiseaseorAttack", "PhysActivity", "Fruits", "Veggies",
+  "HvyAlcoholConsump", "AnyHealthcare", "NoDocbcCost", "DiffWalk", "Sex",
+  
+  # Original categorical (as numeric)
+  "GenHlth", "Age", "Education", "Income",
+  
+  # NEW ENGINEERED FEATURES
+  "Metabolic_Syndrome_Score", "Comprehensive_Health_Risk", 
+  "Age_BMI_Risk", "Poor_Health_Score", "Protective_Lifestyle",
+  "Socioeconomic_Health", "Critical_Conditions"
+)
+
+# Prepare comprehensive correlation dataset
+comprehensive_data <- db_featured[, all_numeric_vars]
+
+# Convert factors to numeric for correlation analysis
+comprehensive_data$Diabetes_binary <- as.numeric(comprehensive_data$Diabetes_binary) - 1
+comprehensive_data$HighBP <- as.numeric(comprehensive_data$HighBP) - 1
+comprehensive_data$HighChol <- as.numeric(comprehensive_data$HighChol) - 1
+comprehensive_data$CholCheck <- as.numeric(comprehensive_data$CholCheck) - 1
+comprehensive_data$Smoker <- as.numeric(comprehensive_data$Smoker) - 1
+comprehensive_data$Stroke <- as.numeric(comprehensive_data$Stroke) - 1
+comprehensive_data$HeartDiseaseorAttack <- as.numeric(comprehensive_data$HeartDiseaseorAttack) - 1
+comprehensive_data$PhysActivity <- as.numeric(comprehensive_data$PhysActivity) - 1
+comprehensive_data$Fruits <- as.numeric(comprehensive_data$Fruits) - 1
+comprehensive_data$Veggies <- as.numeric(comprehensive_data$Veggies) - 1
+comprehensive_data$HvyAlcoholConsump <- as.numeric(comprehensive_data$HvyAlcoholConsump) - 1
+comprehensive_data$AnyHealthcare <- as.numeric(comprehensive_data$AnyHealthcare) - 1
+comprehensive_data$NoDocbcCost <- as.numeric(comprehensive_data$NoDocbcCost) - 1
+comprehensive_data$DiffWalk <- as.numeric(comprehensive_data$DiffWalk) - 1
+comprehensive_data$Sex <- as.numeric(comprehensive_data$Sex) - 1
+comprehensive_data$GenHlth <- as.numeric(comprehensive_data$GenHlth)
+comprehensive_data$Age <- as.numeric(comprehensive_data$Age)
+comprehensive_data$Education <- as.numeric(comprehensive_data$Education)
+comprehensive_data$Income <- as.numeric(comprehensive_data$Income)
+
+# Calculate comprehensive correlation matrix
+comprehensive_cor_matrix <- cor(comprehensive_data, use = "complete.obs")
+
+# Extract correlations with Diabetes (target variable)
+diabetes_correlations <- comprehensive_cor_matrix[1, -1]  # Exclude self-correlation
+diabetes_correlations_sorted <- sort(abs(diabetes_correlations), decreasing = TRUE)
+
+# Print top correlations with diabetes
+cat("TOP 15 FEATURES BY ABSOLUTE CORRELATION WITH DIABETES:\n")
+cat(paste(rep("=", 60), collapse = ""), "\n")
+for (i in 1:15) {
+  feature_name <- names(diabetes_correlations_sorted)[i]
+  correlation_value <- diabetes_correlations[feature_name]
+  cat(sprintf("%2d. %-25s: %6.3f\n", i, feature_name, correlation_value))
+}
+
+# Create correlation heatmap focusing on top predictors + new features
+top_features_for_viz <- c("Diabetes_binary", names(diabetes_correlations_sorted)[1:12])
+viz_data <- comprehensive_data[, top_features_for_viz]
+viz_cor_matrix <- cor(viz_data, use = "complete.obs")
+
+# Convert to long format for plotting
+cor_df_long <- melt(viz_cor_matrix)
+
+# Create enhanced correlation heatmap
+ggplot(data = cor_df_long, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white", size = 0.1) +
+  geom_text(aes(label = round(value, 2)), size = 2.5, color = "black") +
+  scale_fill_gradient2(low = "#053061", high = "#67001f", mid = "white", 
+                       midpoint = 0, limit = c(-1, 1), space = "Lab", 
+                       name = "Correlation") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, size = 9, hjust = 1),
+    axis.text.y = element_text(size = 9),
+    axis.title.x = element_blank(), 
+    axis.title.y = element_blank(),
+    plot.title = element_text(size = 14, hjust = 0.5)
+  ) +
+  labs(title = "Correlation Matrix: Top Diabetes Predictors (Original + Engineered)")
+
+# Check for multicollinearity among top predictors (excluding target)
+cat("\n\nMULTICOLLINEARITY CHECK - High correlations between predictors (|r| > 0.7):\n")
+cat(paste(rep("=", 70), collapse = ""), "\n")
+
+predictor_cor_matrix <- viz_cor_matrix[-1, -1]  # Remove diabetes binary from both dimensions
+high_correlations <- which(abs(predictor_cor_matrix) > 0.7 & predictor_cor_matrix != 1, arr.ind = TRUE)
+
+if (nrow(high_correlations) > 0) {
+  for (i in 1:nrow(high_correlations)) {
+    row_idx <- high_correlations[i, 1]
+    col_idx <- high_correlations[i, 2]
+    if (row_idx < col_idx) {  # Avoid duplicate pairs
+      var1 <- rownames(predictor_cor_matrix)[row_idx]
+      var2 <- colnames(predictor_cor_matrix)[col_idx]
+      correlation_val <- predictor_cor_matrix[row_idx, col_idx]
+      cat(sprintf("%-25s <-> %-25s: %6.3f\n", var1, var2, correlation_val))
+    }
+  }
+} else {
+  cat("No concerning multicollinearity detected (|r| > 0.7)\n")
+}
+
+# Summary of feature engineering success
+cat("\n\nFEATURE ENGINEERING SUMMARY:\n")
+cat(paste(rep("=", 40), collapse = ""), "\n")
+top_engineered <- c("Comprehensive_Health_Risk", "Metabolic_Syndrome_Score", 
+                   "Age_BMI_Risk", "Critical_Conditions")
+for (feature in top_engineered) {
+  if (feature %in% names(diabetes_correlations)) {
+    cat(sprintf("%-25s: %6.3f\n", feature, diabetes_correlations[feature]))
+  }
+}
+```
+
+## 3.4 \| Binning, Encoding and Discretization
+
+## 3.4.1 \| Binning Continuous Variables
+
+```{r}
+library(arules)
+library(fastDummies)
+
+# More balanced binning strategy using quantile-based approach
+db_binned <- db_featured %>%
+  mutate(
+    # BMI binning - using quantile-based for better balance
+    BMI_binned = cut(BMI,
+                     breaks = quantile(BMI, probs = c(0, 0.25, 0.50, 0.75, 1.0), na.rm = TRUE),
+                     labels = c("Low_BMI", "Medium_Low_BMI", "Medium_High_BMI", "High_BMI"),
+                     include.lowest = TRUE),
+    
+    # Mental Health binning - more balanced distribution
+    MentHlth_binned = cut(MentHlth,
+                          breaks = c(-1, 0, 2, 10, 30),
+                          labels = c("No_Days", "Minimal_Days", "Some_Days", "Many_Days"),
+                          right = TRUE),
+    
+    # Physical Health binning - more balanced distribution  
+    PhysHlth_binned = cut(PhysHlth,
+                          breaks = c(-1, 0, 3, 10, 30),
+                          labels = c("No_Days", "Minimal_Days", "Some_Days", "Many_Days"),
+                          right = TRUE)
+  )
+
+# Check the more balanced binning results
+cat("MORE BALANCED Binning Results Summary:\n")
+cat(paste(rep("=", 45), collapse = ""), "\n")
+
+cat("BMI binning (quartile-based for balance):\n")
+print(table(db_binned$BMI_binned))
+cat("Percentages:")
+print(round(prop.table(table(db_binned$BMI_binned)) * 100, 1))
+
+cat("\nMentHlth binning (more balanced):\n")
+print(table(db_binned$MentHlth_binned))
+cat("Percentages:")
+print(round(prop.table(table(db_binned$MentHlth_binned)) * 100, 1))
+
+cat("\nPhysHlth binning (more balanced):\n")
+print(table(db_binned$PhysHlth_binned))
+cat("Percentages:")
+print(round(prop.table(table(db_binned$PhysHlth_binned)) * 100, 1))
+
+# Alternative balanced binning
+db_binned_alt <- db_featured %>%
+  mutate(
+    # BMI - Force 3 balanced groups
+    BMI_binned_alt = cut(BMI,
+                         breaks = quantile(BMI, probs = c(0, 0.33, 0.67, 1.0), na.rm = TRUE),
+                         labels = c("Lower_BMI", "Middle_BMI", "Higher_BMI"),
+                         include.lowest = TRUE),
+    
+    # Mental Health - Binary split for maximum balance
+    MentHlth_binned_alt = ifelse(MentHlth == 0, "No_Poor_Days", "Some_Poor_Days"),
+    
+    # Physical Health - Binary split for maximum balance  
+    PhysHlth_binned_alt = ifelse(PhysHlth == 0, "No_Poor_Days", "Some_Poor_Days")
+  )
+
+cat("\nALTERNATIVE BMI (3 equal groups):\n")
+print(table(db_binned_alt$BMI_binned_alt))
+cat("Percentages:")
+print(round(prop.table(table(db_binned_alt$BMI_binned_alt)) * 100, 1))
+
+cat("\nALTERNATIVE MentHlth (binary for balance):\n")
+print(table(db_binned_alt$MentHlth_binned_alt))
+cat("Percentages:")
+print(round(prop.table(table(db_binned_alt$MentHlth_binned_alt)) * 100, 1))
+
+cat("\nALTERNATIVE PhysHlth (binary for balance):\n")
+print(table(db_binned_alt$PhysHlth_binned_alt))
+cat("Percentages:")
+print(round(prop.table(table(db_binned_alt$PhysHlth_binned_alt)) * 100, 1))
+```
+
+## 3.4.2 One-Hot Encoding
+
+```{r }
+# Perform one-hot encoding for categorical variables
+db_encoded <- db_binned
+
+# One-hot encode ONLY the binned variables (BMI, MentHlth, PhysHlth)
+db_encoded <- dummy_cols(db_encoded, select_columns = "BMI_binned", remove_first_dummy = TRUE)
+db_encoded <- dummy_cols(db_encoded, select_columns = "MentHlth_binned", remove_first_dummy = TRUE)
+db_encoded <- dummy_cols(db_encoded, select_columns = "PhysHlth_binned", remove_first_dummy = TRUE)
+
+# One-hot encode categorical variables with multiple levels
+db_encoded <- dummy_cols(db_encoded, select_columns = "Age", remove_first_dummy = TRUE)
+db_encoded <- dummy_cols(db_encoded, select_columns = "BMI", remove_first_dummy = TRUE)
+db_encoded <- dummy_cols(db_encoded, select_columns = "GenHlth", remove_first_dummy = TRUE)
+db_encoded <- dummy_cols(db_encoded, select_columns = "Education", remove_first_dummy = TRUE)
+db_encoded <- dummy_cols(db_encoded, select_columns = "Income", remove_first_dummy = TRUE)
+db_encoded <- dummy_cols(db_encoded, select_columns = "Age", remove_first_dummy = TRUE)
+
+# Check the new columns created
+new_cols <- colnames(db_encoded)[!colnames(db_encoded) %in% colnames(db_featured)]
+cat("New encoded columns created:", length(new_cols), "\n")
+cat("Sample of new columns:\n")
+print(head(new_cols, 15))
+
+cat("\nTotal variables in encoded dataset:", ncol(db_encoded), "\n")
+
+# Keep all engineered features as continuous (no binning)
+cat("\nEngineered features kept as continuous:\n")
+engineered_features <- c("Metabolic_Syndrome_Score", "Comprehensive_Health_Risk", 
+                        "Age_BMI_Risk", "Poor_Health_Score", "Protective_Lifestyle",
+                        "Socioeconomic_Health", "Critical_Conditions")
+cat(paste(engineered_features, collapse = ", "))
+```
+
+## 3.5 \| Feature Selection using Random Forest
+
+## 3.5.1 \| Random Forest Feature Importance
+
+```{r }
+
+library(randomForest)
+library(dplyr)
+
+# Prepare data for Random Forest (remove original categorical columns and target)
+columns_to_remove <- c("BMI_binned", "MentHlth_binned", "PhysHlth_binned", 
+                       "BMI", 
+                      "Age", "Education", "Income", "GenHlth")
+
+# Create feature matrix (exclude target variable and original categorical columns)
+rf_data <- db_encoded %>%
+  dplyr::select(-Diabetes_binary, -all_of(columns_to_remove)) %>%
+  # Convert remaining factors to numeric
+  mutate_if(is.factor, as.numeric)
+
+# Prepare target variable
+target <- as.factor(db_encoded$Diabetes_binary)
+
+# Handle any remaining missing values
+rf_data <- rf_data %>%
+  mutate_all(~ifelse(is.na(.), median(., na.rm = TRUE), .))
+
+# Check data dimensions before Random Forest
+cat("Random Forest input data dimensions:", dim(rf_data), "\n")
+cat("Number of features for Random Forest:", ncol(rf_data), "\n")
+cat("Target variable levels:", levels(target), "\n")
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Train Random Forest model
+rf_model <- randomForest(x = rf_data, y = target, 
+                        ntree = 20, 
+                        importance = TRUE)
+rf_model
+
+# Get feature importances
+importances <- importance(rf_model)
+importances_df <- data.frame(
+  Feature = rownames(importances),
+  Importance = importances[, "MeanDecreaseGini"]
+) %>%
+  arrange(desc(Importance))
+
+# Print top 20 features
+cat("\nTop 20 Feature Rankings:\n")
+cat(paste(rep("=", 50), collapse = ""), "\n")
+for (i in 1:min(20, nrow(importances_df))) {
+  cat(sprintf("%2d. %-30s: %.4f\n", i, importances_df$Feature[i], importances_df$Importance[i]))
+}
+```
+
+## 3.5.2 \| Plot Feature Importance
+
+```{r }
+# Plot top 30 features
+top30_features <- head(importances_df, 30)
+
+ggplot(top30_features, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "steelblue", alpha = 0.8) +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Top 30 Feature Importance (Random Forest)", 
+       x = "Features", 
+       y = "Importance Score") +
+  theme(text = element_text(size = 12))
+
+# Select top features for final model
+top_features <- head(importances_df, 25)$Feature
+cat("Selected top 25 features for modeling:\n")
+print(top_features)
+```
+
+## 3.5.3 \| Check Correlated Features
+
+```{r}
+# Quick multicollinearity check for top 25 features
+top_features_data <- rf_data[, top_features]
+
+# Calculate correlation matrix
+cor_matrix_top <- cor(top_features_data, use = "complete.obs")
+
+# Find high correlations (|r| > 0.7)
+high_cors <- which(abs(cor_matrix_top) > 0.7 & cor_matrix_top != 1, arr.ind = TRUE)
+
+cat("HIGH CORRELATIONS (|r| > 0.7):\n")
+if (nrow(high_cors) > 0) {
+  for (i in 1:nrow(high_cors)) {
+    row_idx <- high_cors[i, 1]
+    col_idx <- high_cors[i, 2]
+    if (row_idx < col_idx) {
+      var1 <- rownames(cor_matrix_top)[row_idx]
+      var2 <- colnames(cor_matrix_top)[col_idx]
+      correlation_val <- cor_matrix_top[row_idx, col_idx]
+      cat(sprintf("%-20s <-> %-20s: %5.3f\n", var1, var2, correlation_val))
+    }
+  }
+} else {
+  cat("No high correlations found.\n")
+}
+
+```
+
+## 3.5.4 \| Remove features
+
+```{r }
+# Remove highly correlated features (keep the more important ones)
+features_to_remove <- c(
+  "Critical_Conditions",      # Remove (keep Metabolic_Syndrome_Score - higher importance)
+  "Poor_Health_Score",        # Remove (keep PhysHlth - original feature)
+  "BMI_group",               # Remove (keep BMI - original feature)
+  "Smoker",                   # Remove (keep Protective_Lifestyle - engineered feature)
+  "BMI"                   # Remove (keep Protective_Lifestyle - engineered feature)
+)
+
+# Create final feature set
+final_features <- setdiff(top_features, features_to_remove)
+# Create final dataset with selected features
+final_dataset <- db_encoded[, c("Diabetes_binary", final_features)]
+
+# Create final feature set
+final_features <- setdiff(top_features, features_to_remove)
+
+cat("Removed features due to multicollinearity:\n")
+print(features_to_remove)
+
+cat("\nFinal feature set (", length(final_features), " features):\n")
+print(final_features)
+
+# CREATE THE MISSING final_dataset OBJECT HERE:
+final_dataset <- db_encoded[, c("Diabetes_binary", final_features)]
+
+# Verify correlations are reduced
+final_features_data <- rf_data[, final_features]
+cat("Removed features due to multicollinearity:\n")
+print(features_to_remove)
+
+cat("\nFinal feature set (", length(final_features), " features):\n")
+print(final_features)
+
+# Verify correlations are reduced
+final_features_data <- rf_data[, final_features]
+final_cor_matrix <- cor(final_features_data, use = "complete.obs")
+high_cors_final <- which(abs(final_cor_matrix) > 0.7 & final_cor_matrix != 1, arr.ind = TRUE)
+
+cat("\nRemaining high correlations after removal:\n")
+if (nrow(high_cors_final) > 0) {
+  cat("Still some high correlations - may need further reduction.\n")
+} else {
+  cat("Success! No more high correlations (|r| > 0.7)\n")
+}
+```
+
+
+## 3.5.6 \| Data Splitting and Scaling
+
+```{r}
+
+library(caret)
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Create train/test split (80/20)
+train_index <- createDataPartition(final_dataset$Diabetes_binary, 
+                                  p = 0.8, 
+                                  list = FALSE)
+
+# Split the data
+train_data <- final_dataset[train_index, ]
+test_data <- final_dataset[-train_index, ]
+
+# Further split training data into train/validation (75/25 of training set)
+val_index <- createDataPartition(train_data$Diabetes_binary, 
+                                p = 0.75, 
+                                list = FALSE)
+
+train_final <- train_data[val_index, ]
+validation_data <- train_data[-val_index, ]
+
+# Check class distribution
+cat("Training set distribution:\n")
+print(table(train_final$Diabetes_binary))
+cat("\nValidation set distribution:\n")
+print(table(validation_data$Diabetes_binary))
+cat("\nTest set distribution:\n")
+print(table(test_data$Diabetes_binary))
+
+# Scale the features (excluding target variable)
+preProcValues <- preProcess(train_final[, -1], method = c("center", "scale"))
+
+# Apply scaling to all datasets
+train_scaled <- train_final
+train_scaled[, -1] <- predict(preProcValues, train_final[, -1])
+
+validation_scaled <- validation_data
+validation_scaled[, -1] <- predict(preProcValues, validation_data[, -1])
+
+test_scaled <- test_data
+test_scaled[, -1] <- predict(preProcValues, test_data[, -1])
+
+cat("Data preprocessing completed successfully!\n")
+cat("Final dataset ready for modeling with", ncol(final_dataset)-1, "features\n")
+```
+
+
+
+## 3.5.5 \| Remove features
+
+```{r }
+## 3.5.5 | Data Splitting and Clean Dataset Creation
+
+```{r}
+# =============================================================================
+# DATA SPLITTING FIRST - BEFORE CLEANING
+# =============================================================================
+
+library(caret)
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Create train/test split (80/20)
+train_index <- createDataPartition(final_dataset$Diabetes_binary, 
+                                  p = 0.8, 
+                                  list = FALSE)
+
+# Split the data
+train_data <- final_dataset[train_index, ]
+test_data <- final_dataset[-train_index, ]
+
+# Further split training data into train/validation (75/25 of training set)
+val_index <- createDataPartition(train_data$Diabetes_binary, 
+                                p = 0.75, 
+                                list = FALSE)
+
+train_final <- train_data[val_index, ]
+validation_data <- train_data[-val_index, ]
+
+# =============================================================================
+# NOW CREATE CLEAN DATASETS
+# =============================================================================
+
+# Features to remove (keep the more informative engineered features)
+features_to_remove <- c("BMI")  # Remove BMI since Age_BMI_Risk is more informative
+
+# Create clean feature set
+if("BMI" %in% names(final_dataset)) {
+  cat("Removing BMI (keeping Age_BMI_Risk)\n")
+  final_dataset_clean <- final_dataset[, !names(final_dataset) %in% features_to_remove]
+} else {
+  final_dataset_clean <- final_dataset
+}
+
+# Re-split data with clean features
+train_data_clean <- final_dataset_clean[train_index, ]
+test_data_clean <- final_dataset_clean[-train_index, ]
+
+# Use same validation indices
+train_final_clean <- train_data_clean[val_index, ]
+validation_data_clean <- train_data_clean[-val_index, ]
+
+# Scale the features (excluding target variable)
+preProcValues_clean <- preProcess(train_final_clean[, -1], method = c("center", "scale"))
+
+# Apply scaling
+train_scaled_clean <- train_final_clean
+train_scaled_clean[, -1] <- predict(preProcValues_clean, train_final_clean[, -1])
+
+validation_scaled_clean <- validation_data_clean
+validation_scaled_clean[, -1] <- predict(preProcValues_clean, validation_data_clean[, -1])
+
+test_scaled_clean <- test_data_clean
+test_scaled_clean[, -1] <- predict(preProcValues_clean, test_data_clean[, -1])
+
+# Also create the regular scaled datasets
+preProcValues <- preProcess(train_final[, -1], method = c("center", "scale"))
+
+train_scaled <- train_final
+train_scaled[, -1] <- predict(preProcValues, train_final[, -1])
+
+validation_scaled <- validation_data
+validation_scaled[, -1] <- predict(preProcValues, validation_data[, -1])
+
+test_scaled <- test_data
+test_scaled[, -1] <- predict(preProcValues, test_data[, -1])
+
+# Fix column names
+fix_column_names <- function(df) {
+  names(df) <- make.names(names(df))
+  return(df)
+}
+
+train_scaled_clean <- fix_column_names(train_scaled_clean)
+validation_scaled_clean <- fix_column_names(validation_scaled_clean)
+test_scaled_clean <- fix_column_names(test_scaled_clean)
+
+cat("All datasets created successfully!\n")
+cat("Clean dataset features:", ncol(train_scaled_clean) - 1, "\n")
+```
+
+```         
+```
+
+
+# **4. \| Model Implementation**
+
+This section will implement various machine learning models as mentioned in **Introduction** section. In addition, **explanation for each models will be provided**.
+
+## 4.1 \| Logistic Regression
+
+**Logistic regression** is a supervised learning algorithm used for binary classification tasks. It models the probability of a binary outcome using a logistic function, which ensures that the predictions fall between 0 and 1.
+
+**Logistic regression** is a statistical method that is used for building machine learning models where **the dependent variable is dichotomous: i.e. binary**. Logistic regression is used to describe data and **the relationship between one dependent variable and one or more independent variables**. The independent variables can be nominal, ordinal, or of interval type.\
+\
+The name "logistic regression" is derived from the concept of the logistic function that it uses. **The logistic function is also known as the sigmoid function**. The value of this logistic function lies between zero and one.
+
+```{r, echo=FALSE}
+include_graphics("https://upload.wikimedia.org/wikipedia/commons/thumb/5/53/Sigmoid-function-2.svg/1280px-Sigmoid-function-2.svg.png")
+
+```
+
+By Wikimedia Commns
+
+### 
+
+```{r}
+# Load required libraries
+library(pROC)
+library(xgboost)
+library(broom)
+library(knitr)
+
+# =============================================================================
+# COLUMN NAMES ARRANGEMENT
+# =============================================================================
+# column names with spaces/special characters
+fix_column_names <- function(df) {
+  names(df) <- make.names(names(df))
+  return(df)
+}
+
+# Apply fix to all datasets
+train_scaled <- fix_column_names(train_scaled)
+validation_scaled <- fix_column_names(validation_scaled)
+test_scaled <- fix_column_names(test_scaled)
+
+cat("Column names fixed for compatibility\n")
+
+# =============================================================================
+# 1. LOGISTIC REGRESSION MODEL
+# =============================================================================
+
+# Use cleaned and scaled data
+train_lr <- train_scaled_clean
+validation_lr <- validation_scaled_clean
+
+# Ensure outcome variable is a factor
+train_lr$Diabetes_binary <- as.factor(train_lr$Diabetes_binary)
+validation_lr$Diabetes_binary <- as.factor(validation_lr$Diabetes_binary)
+
+# Fit the logistic regression model
+set.seed(503)
+lr_model <- glm(Diabetes_binary ~ ., data = train_lr, family = binomial)
+
+# Make predictions
+lr_pred_prob <- predict(lr_model, validation_lr, type = "response")
+lr_pred_class <- ifelse(lr_pred_prob > 0.5, "1", "0")
+
+# Evaluate performance
+lr_cm <- confusionMatrix(factor(lr_pred_class, levels = c("0", "1")),
+                         validation_lr$Diabetes_binary)
+
+lr_roc <- roc(validation_lr$Diabetes_binary, lr_pred_prob, quiet = TRUE)
+
+# Output results
+cat("Logistic Regression Results:\n")
+cat("Accuracy:", round(lr_cm$overall['Accuracy'], 4), "\n")
+cat("AUC:", round(auc(lr_roc), 4), "\n")
+
+#Logistic Regression, Accuracy: 0.7363, AUC: 0.8106
+
+```
+
+## 4.2 \| Random Forest
+
+```{r}
+# 2. RANDOM FOREST - Shrey
+
+library(randomForest)
+library(pROC)
+
+# Only use features that exist in current dataset
+existing_rf_features <- intersect(final_features, names(train_scaled_clean))
+
+# Subset training and validation sets
+train_rf <- train_scaled_clean[, c("Diabetes_binary", existing_rf_features)]
+validation_rf <- validation_scaled_clean[, c("Diabetes_binary", existing_rf_features)]
+
+# Ensure Diabetes_binary is a factor
+train_rf$Diabetes_binary <- as.factor(train_rf$Diabetes_binary)
+validation_rf$Diabetes_binary <- as.factor(validation_rf$Diabetes_binary)
+
+set.seed(503)
+rf_model <- randomForest(Diabetes_binary ~ ., 
+                         data = train_rf, 
+                         ntree = 100,
+                         importance = TRUE)
+
+rf_pred_class <- predict(rf_model, newdata = validation_rf)
+rf_pred_prob <- predict(rf_model, newdata = validation_rf, type = "prob")[,2]
+
+rf_cm <- confusionMatrix(rf_pred_class, validation_rf$Diabetes_binary)
+rf_roc <- roc(validation_rf$Diabetes_binary, rf_pred_prob, quiet = TRUE)
+
+cat("Random Forest Results:\n")
+cat("Accuracy:", round(rf_cm$overall['Accuracy'], 4), "\n")
+cat("AUC:", round(auc(rf_roc), 4), "\n")
+
+# Extract variable importance
+importance_df <- as.data.frame(importance(rf_model))
+importance_df$Feature <- rownames(importance_df)
+importance_df <- importance_df[order(importance_df$MeanDecreaseGini, decreasing = TRUE), ]
+
+library(ggplot2)
+ggplot(importance_df, aes(x = reorder(Feature, MeanDecreaseGini), y = MeanDecreaseGini)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Random Forest - Variable Importance (MeanDecreaseGini)",
+       x = "Features", y = "Importance Score") +
+  theme_minimal()
+
+#Random Forest, Accuracy: 0.7025, AUC: 0.7483
+```
+
+## 4.3 \| K-Nearest Neighbors
+
+```{r}
+# 3. K-NEAREST NEIGHBORS (KNN) - Michelle
+train_knn_fixed <- train_scaled_clean
+validation_knn_fixed <- validation_scaled_clean
+
+# Fix factor levels
+train_knn_fixed$Diabetes_binary <- factor(train_knn_fixed$Diabetes_binary, levels = c("0", "1"), labels = c("No", "Yes"))
+validation_knn_fixed$Diabetes_binary <- factor(validation_knn_fixed$Diabetes_binary, levels = c("0", "1"), labels = c("No", "Yes"))
+
+# Define training control
+ctrl <- trainControl(method = "cv", number = 5, summaryFunction = twoClassSummary, classProbs = TRUE, verboseIter = FALSE)
+
+# Train KNN model
+set.seed(503)
+knn_model_fixed <- train(Diabetes_binary ~ ., 
+                        data = train_knn_fixed,
+                        method = "knn",
+                        tuneLength = 5,
+                        metric = "ROC",
+                        trControl = ctrl)
+
+# Make predictions
+knn_pred_class <- predict(knn_model_fixed, newdata = validation_knn_fixed)
+knn_pred_prob <- predict(knn_model_fixed, newdata = validation_knn_fixed, type = "prob")[, "Yes"]
+
+# Create confusion matrix
+conf_matrix <- confusionMatrix(knn_pred_class, validation_knn_fixed$Diabetes_binary, positive = "Yes")
+
+# Results
+roc_obj <- roc(validation_knn_fixed$Diabetes_binary, knn_pred_prob, quiet = TRUE)
+cat("Accuracy:", round(conf_matrix$overall['Accuracy'], 4), "\n")
+cat("AUC:", round(auc(roc_obj), 4), "\n")
+
+```
+
+```{r}
+# Create confusion matrix
+conf_matrix <- confusionMatrix(knn_pred_class, validation_knn_fixed$Diabetes_binary, positive = "Yes")
+
+# Results
+knn_roc <- roc(validation_knn_fixed$Diabetes_binary, knn_pred_prob, quiet = TRUE)
+
+# Plot ROC curve
+plot(knn_roc, main = "ROC Curve - KNN", col = "blue", lwd = 2)
+
+# Print results
+cat("Accuracy:", round(conf_matrix$overall['Accuracy'], 4), "\n")
+cat("AUC:", round(auc(knn_roc), 4), "\n")
+cat("Sensitivity:", round(conf_matrix$byClass['Sensitivity'], 4), "\n")
+cat("Specificity:", round(conf_matrix$byClass['Specificity'], 4), "\n")
+
+
+```
+
+## 4.5 \| CART
+
+```{r}
+# 5. CART - Shrey
+
+library(rpart)
+library(rpart.plot)
+library(pROC)
+library(caret)
+
+# Make sure the outcome variable is a factor
+train_cart <- train_scaled_clean
+validation_cart <- validation_scaled_clean
+train_cart$Diabetes_binary <- as.factor(train_cart$Diabetes_binary)
+validation_cart$Diabetes_binary <- as.factor(validation_cart$Diabetes_binary)
+
+# Fit the CART model
+set.seed(503)
+cart_model <- rpart(Diabetes_binary ~ ., data = train_cart, method = "class")
+
+# Visualize the decision tree
+rpart.plot(cart_model, main = "CART - Decision Tree")
+
+# Predictions
+cart_pred_class <- predict(cart_model, validation_cart, type = "class")
+cart_pred_prob <- predict(cart_model, validation_cart, type = "prob")[,2]
+
+# Evaluate performance
+cart_cm <- confusionMatrix(cart_pred_class, validation_cart$Diabetes_binary)
+cart_roc <- roc(validation_cart$Diabetes_binary, cart_pred_prob, quiet = TRUE)
+
+# Output results
+cat("CART Results:\n")
+cat("Accuracy:", round(cart_cm$overall['Accuracy'], 4), "\n")
+cat("AUC:", round(auc(cart_roc), 4), "\n")
+
+```
+
+## 4.6 \| c5.0
+
+```{r}
+# 6. C5.0 - Michelle
+
+train_data$Diabetes_binary <- factor(train_data$Diabetes_binary, levels = c("0", "1"), labels = c("No", "Yes"))
+test_data$Diabetes_binary <- factor(test_data$Diabetes_binary, levels = c("0", "1"), labels = c("No", "Yes"))
+
+c50_model <- train(Diabetes_binary ~ ., data = train_data,
+                   method = "C5.0",
+                   tuneLength = 5,
+                   metric = "ROC",
+                   trControl = ctrl)
+c50_pred_class <- predict(c50_model, newdata = test_data)
+c50_pred_prob <- predict(c50_model, newdata = test_data, type = "prob")[, "Yes"]
+conf_matrix <- confusionMatrix(c50_pred_class, test_data$Diabetes_binary, positive = "Yes")
+print(conf_matrix)
+roc_obj <- roc(test_data$Diabetes_binary, c50_pred_prob)
+plot(roc_obj, main = "ROC Curve - C5.0", col = "darkgreen")
+auc(roc_obj)
+c50_varimp <- varImp(c50_model, scale = TRUE)
+plot(c50_varimp, top = 20, main = "Feature Importance - C5.0")
+
+```
+
+## 4.7 \| Bagging
+
+```{r}
+
+# =============================================================================
+# 7. BAGGING - Maria
+# =============================================================================
+cat("\n=== TRAINING BAGGING ===\n")
+
+library(randomForest)
+
+# Bagging is Random Forest with all features considered at each split
+bagging_model <- randomForest(Diabetes_binary ~ ., data = train_scaled, 
+                             ntree = 100, mtry = ncol(train_scaled) - 1)
+bagging_pred_class <- predict(bagging_model, validation_scaled)
+bagging_pred_prob <- predict(bagging_model, validation_scaled, type = "prob")[,2]
+
+bagging_cm <- confusionMatrix(bagging_pred_class, validation_scaled$Diabetes_binary)
+bagging_roc <- roc(validation_scaled$Diabetes_binary, bagging_pred_prob, quiet = TRUE)
+
+cat("Bagging Results:\n")
+cat("Accuracy:", round(bagging_cm$overall['Accuracy'], 4), "\n")
+cat("AUC:", round(auc(bagging_roc), 4), "\n")
+```
+
+## 4.8 \| LDA
+
+```{r}
+# =============================================================================
+# 8. LDA - Maria
+# =============================================================================
+cat("\n=== TRAINING LDA ===\n")
+
+library(MASS)
+
+lda_model <- lda(Diabetes_binary ~ ., data = train_scaled)
+lda_pred <- predict(lda_model, validation_scaled)
+lda_pred_class <- lda_pred$class
+lda_pred_prob <- lda_pred$posterior[,2]
+
+lda_cm <- confusionMatrix(lda_pred_class, validation_scaled$Diabetes_binary)
+lda_roc <- roc(validation_scaled$Diabetes_binary, lda_pred_prob, quiet = TRUE)
+
+cat("LDA Results:\n")
+cat("Accuracy:", round(lda_cm$overall['Accuracy'], 4), "\n")
+cat("AUC:", round(auc(lda_roc), 4), "\n")
+```
+
+## 4.9 \| GLMNET
+
+```{r}
+# =============================================================================
+# 9. GLMNET - Maria
+# =============================================================================
+cat("\n=== TRAINING GLMNET ===\n")
+
+library(glmnet)
+
+x_train <- as.matrix(train_scaled[, -1])
+y_train <- as.numeric(train_scaled$Diabetes_binary) - 1
+x_val <- as.matrix(validation_scaled[, -1])
+
+glmnet_model <- cv.glmnet(x_train, y_train, family = "binomial", alpha = 1)
+glmnet_pred_prob <- predict(glmnet_model, x_val, type = "response", s = "lambda.min")
+glmnet_pred_class <- ifelse(glmnet_pred_prob > 0.5, "1", "0")
+
+glmnet_cm <- confusionMatrix(factor(glmnet_pred_class), validation_scaled$Diabetes_binary)
+glmnet_roc <- roc(validation_scaled$Diabetes_binary, as.vector(glmnet_pred_prob), quiet = TRUE)
+
+cat("GLMNET Results:\n")
+cat("Accuracy:", round(glmnet_cm$overall['Accuracy'], 4), "\n")
+cat("AUC:", round(auc(glmnet_roc), 4), "\n")
+```
+
+## 4.10 \| XGBOOST
+
+```{r}
+# =============================================================================
+# 10. XGBOOST MODEL - Maria
+# =============================================================================
+cat("\n=== TRAINING XGBOOST ===\n")
+
+library(xgboost)
+
+# Prepare data for XGBoost - ensure all data is numeric
+# Remove target variable and convert to matrix
+train_matrix <- train_scaled_clean[, -which(names(train_scaled_clean) == "Diabetes_binary")]
+val_matrix <- validation_scaled_clean[, -which(names(validation_scaled_clean) == "Diabetes_binary")]
+
+# Convert any factors to numeric
+train_matrix[] <- lapply(train_matrix, function(x) {
+  if(is.factor(x)) as.numeric(as.character(x)) else as.numeric(x)
+})
+
+val_matrix[] <- lapply(val_matrix, function(x) {
+  if(is.factor(x)) as.numeric(as.character(x)) else as.numeric(x)
+})
+
+# Prepare target variables (convert to 0/1)
+train_labels <- as.numeric(as.character(train_scaled_clean$Diabetes_binary))
+val_labels <- as.numeric(as.character(validation_scaled_clean$Diabetes_binary))
+
+# Create DMatrix objects
+dtrain <- xgb.DMatrix(data = as.matrix(train_matrix), label = train_labels)
+dval <- xgb.DMatrix(data = as.matrix(val_matrix), label = val_labels)
+
+# XGBoost parameters
+xgb_params <- list(
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  max_depth = 6,
+  eta = 0.1,
+  seed = 123
+)
+
+# Train XGBoost model
+xgb_model <- xgb.train(
+  params = xgb_params,
+  data = dtrain,
+  nrounds = 100,
+  verbose = 0
+)
+
+# Make predictions on validation set
+xgb_pred_prob <- predict(xgb_model, dval)
+xgb_pred_class <- ifelse(xgb_pred_prob > 0.5, "1", "0")
+
+# Evaluate XGBoost
+xgb_cm <- confusionMatrix(factor(xgb_pred_class), factor(val_labels))
+xgb_roc <- roc(factor(val_labels), xgb_pred_prob, quiet = TRUE)
+
+cat("XGBoost Results:\n")
+cat("Accuracy:", round(xgb_cm$overall['Accuracy'], 4), "\n")
+cat("AUC:", round(auc(xgb_roc), 4), "\n")
+```
+
+```{r}
+# =============================================================================
+# RESULTS COMPARISON
+# =============================================================================
+cat("\n=== MODEL COMPARISON ===\n")
+
+# Combine all results
+all_results <- data.frame(
+  Model = c("XGBoost", "Bagging", "LDA", "GLMNET"),
+  Accuracy = c(xgb_cm$overall['Accuracy'], bagging_cm$overall['Accuracy'], 
+               lda_cm$overall['Accuracy'], glmnet_cm$overall['Accuracy']),
+  AUC = c(auc(xgb_roc), auc(bagging_roc), auc(lda_roc), auc(glmnet_roc)),
+  Sensitivity = c(xgb_cm$byClass['Sensitivity'], bagging_cm$byClass['Sensitivity'], 
+                  lda_cm$byClass['Sensitivity'], glmnet_cm$byClass['Sensitivity']),
+  Specificity = c(xgb_cm$byClass['Specificity'], bagging_cm$byClass['Specificity'], 
+                  lda_cm$byClass['Specificity'], glmnet_cm$byClass['Specificity'])
+)
+
+# Round and sort by AUC
+all_results <- all_results[order(-all_results$AUC), ]
+all_results[,2:5] <- round(all_results[,2:5], 4)
+
+kable(all_results, caption = "Complete Model Performance Comparison (Sorted by AUC)", row.names = FALSE)
+```
+
+```{r}
+# =============================================================================
+# ROC CURVES
+# =============================================================================
+
+# Store all ROC curves
+all_rocs <- list( XGB = xgb_roc,Bagging = bagging_roc, LDA = lda_roc, GLMNET = glmnet_roc)
+
+# Plot all ROC curves
+colors <- rainbow(length(all_rocs))
+plot(all_rocs[[1]], col = colors[1], main = "ROC Curves - All Models", lwd = 2)
+
+for(i in 2:length(all_rocs)) {
+  lines(all_rocs[[i]], col = colors[i], lwd = 2)
+}
+
+legend("bottomright", 
+       legend = paste(names(all_rocs), "(", round(sapply(all_rocs, auc), 3), ")"),
+       col = colors, lwd = 2, cex = 0.7)
+```
+
+```{r}
+# =============================================================================
+# TOP PERFORMERS
+# =============================================================================
+cat("\n=== TOP 3 PERFORMING MODELS ===\n")
+top3 <- head(all_results, 3)
+kable(top3, caption = "Top 3 Models by AUC", row.names = FALSE)
+
+cat("\nBest performing model:", all_results$Model[1], "with AUC =", all_results$AUC[1], "\n")
+cat("All", nrow(all_results), "models trained successfully!\n")
+
+```
+
+
